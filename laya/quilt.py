@@ -15,10 +15,17 @@ Doctrine (kept model-free on purpose):
 - EFFECT: derived state (verify results, rollups) is recomputed from rows,
          never trusted as stored.
 - VIEW:  exports book a VIEW row; the export is a projection, not the truth.
+- FORGET: a citation row marks a prior row superseded — the target is
+         preserved verbatim, never deleted (fleet 5+1).
 - REFUSED: a malformed engine result or an invalid operation books a named
          refusal row — refusals are visible, never silent drops.
 - Disagreement is preserved, not deleted: ensembles keep every engine's
          answer; resolution is a new row that cites rivals, never erases them.
+
+Chain widths: fnv1a-64 is the canonical fleet mode (Quilt Charter — the same
+width the reference kernel's WAL uses, so any kernel port verifies these
+rows). fnv1a-32 remains as `chain="fnv1a32"` for ledgers that already hold
+legacy rows; new ledgers should default to the 64-bit mode.
 
 The module is stdlib-only. Torch and the checkpoints are loaded lazily by
 QuiltLayaBridge, so this file runs (and its chain verifies) anywhere Python
@@ -31,6 +38,7 @@ import time as _time
 __all__ = [
     "FNV1A_OFFSET",
     "fnv1a32",
+    "fnv1a64",
     "canonical",
     "sha256_hex",
     "QuiltLedger",
@@ -41,15 +49,22 @@ FNV1A_OFFSET = 0x811C9DC5
 FNV1A_PRIME = 0x01000193
 MASK32 = 0xFFFFFFFF
 
-GENESIS = "0" * 8  # chain_prev of the first row
+FNV1A64_OFFSET = 0xCBF29CE484222325
+FNV1A64_PRIME = 0x100000001B3
+MASK64 = 0xFFFFFFFFFFFFFFFF
+
+GENESIS32 = "0" * 8   # chain_prev of the first row, fnv1a-32 ledgers
+GENESIS64 = "0" * 16  # chain_prev of the first row, fnv1a-64 (fleet canonical)
+GENESIS = GENESIS32  # back-compat alias
 
 
 def fnv1a32(data):
-    """fnv1a-32 over bytes — the reference quilt kernel's chain algorithm.
+    """fnv1a-32 over bytes — legacy chain width (kept for existing ledgers).
 
     Integrity, not security: catches accidental mutation and pins tamper at
-    its own row. Any 5-opcode kernel port (TS, Rust, C, WASM, GDScript)
-    recomputes this chain without Python.
+    its own row. Any 5-opcode kernel port recomputes this chain without
+    Python. New ledgers should prefer :func:`fnv1a64`, the fleet-canonical
+    width the Quilt Charter specifies.
     """
     if isinstance(data, str):
         data = data.encode("utf-8")
@@ -57,6 +72,22 @@ def fnv1a32(data):
     for byte in data:
         h ^= byte
         h = (h * FNV1A_PRIME) & MASK32
+    return h
+
+
+def fnv1a64(data):
+    """fnv1a-64 over bytes — the fleet-canonical chain width (Quilt Charter).
+
+    Same algorithm, 64-bit state: this is the width the reference quilt
+    kernel's WAL chains with, so rows booked under fnv1a64 cross-verify with
+    hermit, git-agent, and the kernel ports without any width translation.
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    h = FNV1A64_OFFSET
+    for byte in data:
+        h ^= byte
+        h = (h * FNV1A64_PRIME) & MASK64
     return h
 
 
@@ -84,13 +115,21 @@ class QuiltLedger:
     row N-1's `row_hash`, so a mutation anywhere pins the first bad row.
     """
 
-    def __init__(self, actor, engine, clock=None):
+    CHAINS = {"fnv1a32": (fnv1a32, GENESIS32, "%08x"),
+              "fnv1a64": (fnv1a64, GENESIS64, "%016x")}
+
+    def __init__(self, actor, engine, clock=None, chain="fnv1a32"):
         if not actor or not isinstance(actor, str):
             raise ValueError("ledger requires an actor (the witness-stake)")
         if not engine or not isinstance(engine, str):
             raise ValueError("ledger requires an engine identity")
+        if chain not in self.CHAINS:
+            raise ValueError(
+                "unknown chain %r; expected one of %s" % (chain, sorted(self.CHAINS)))
         self.actor = actor
         self.engine = engine
+        self.chain = chain
+        self._hash, self._genesis, self._fmt = self.CHAINS[chain]
         self._clock = clock or _now
         self.rows = []
         self._tick = 0
@@ -109,9 +148,9 @@ class QuiltLedger:
             "actor": self.actor,
             "engine": self.engine,
             "payload": payload,
-            "chain_prev": self.rows[-1]["row_hash"] if self.rows else GENESIS,
+            "chain_prev": self.rows[-1]["row_hash"] if self.rows else self._genesis,
         }
-        row["row_hash"] = "%08x" % fnv1a32(canonical(row))
+        row["row_hash"] = self._fmt % self._hash(canonical(row))
         self.rows.append(row)
         return row
 
@@ -192,14 +231,61 @@ class QuiltLedger:
             "rationale": rationale,
         })
 
+    def forget(self, target_hash, reason):
+        """FORGET (the fleet's +1 opcode): a citation row marking a prior row
+        superseded. The target is preserved verbatim — this books a pointer,
+        it never deletes. Unknown targets book a REFUSED row."""
+        target = next((r for r in self.rows if r["row_hash"] == target_hash), None)
+        if target is None:
+            return self._book("REFUSED", {
+                "reason": "FORGET_TARGET_NOT_FOUND",
+                "detail": target_hash,
+            })
+        return self._book("FORGET", {
+            "target": target_hash,
+            "target_op": target["op"],
+            "reason": reason,
+        })
+
+    # -------------------------------------------------------------- persistence
+    def append_jsonl(self, path):
+        """Canonical fleet serialization: append rows to a JSONL WAL.
+
+        If `path` already holds rows from this ledger, they are loaded first
+        so the chain continues (a second instance appends, never restarts).
+        The file is the projection; the in-memory rows remain the truth until
+        booked. Returns the number of rows now on disk.
+        """
+        path = str(path)
+        existing = []
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                existing = [json.loads(line) for line in fh if line.strip()]
+        except FileNotFoundError:
+            pass
+        if existing and not self.rows:
+            # Continuing a ledger from disk: adopt its chain state wholesale.
+            self.rows = existing
+            self._tick = max((r.get("tick", 0) for r in existing), default=0)
+        start = len(existing)
+        new_rows = self.rows[start:]
+        if not new_rows and start:
+            return start
+        with open(path, "a", encoding="utf-8") as fh:
+            for row in new_rows:
+                fh.write(canonical(row) + "\n")
+            fh.flush()
+        return len(self.rows)
+
     # ------------------------------------------------------------------ views
     def verify(self):
         """Replay the chain from genesis. Returns (ok, first_bad_row_hash).
         EFFECT rows are recomputed-ok by construction (derived state is
         derived); the check is chain integrity + schema, row by row."""
-        prev = GENESIS
+        prev = self._genesis
         for row in self.rows:
-            want = "%08x" % fnv1a32(canonical({k: v for k, v in row.items() if k != "row_hash"}))
+            want = self._fmt % self._hash(
+                canonical({k: v for k, v in row.items() if k != "row_hash"}))
             if row.get("chain_prev") != prev or row.get("row_hash") != want:
                 return False, row.get("row_hash", "unknown")
             prev = row["row_hash"]
@@ -214,7 +300,7 @@ class QuiltLedger:
         booked: a view describes the ledger as it was when observed, and
         the VIEW row itself is the receipt that the observation happened.
         """
-        head = self.rows[-1]["row_hash"] if self.rows else GENESIS
+        head = self.rows[-1]["row_hash"] if self.rows else self._genesis
         self._book("VIEW", {"format": fmt, "rows": len(self.rows), "head": head})
         if fmt == "json":
             return {"rows": list(self.rows), "chain_head": head}
