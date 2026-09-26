@@ -4,8 +4,10 @@ Every laya decision can be booked as an **attested observation**: content
 (state + questions + answers), a witness-stake (the operator and the exact
 checkpoint that served the decision), a time-context (a monotonic tick —
 partial order, never false finality), and a content-binding (a hash chain
-over canonical rows, fnv1a-32 — the same chain algorithm the reference
-quilt kernel uses, so any kernel port can verify rows written here).
+over canonical rows — **fnv1a-64 in the canonical fleet mode**
+(`chain="fnv1a64"`, the width the Quilt Charter specifies and the reference
+kernel's WAL uses), **fnv1a-32 as legacy** for ledgers that already hold
+32-bit rows. Any kernel port verifies rows written here in either width).
 
 `laya/quilt.py` is **stdlib-only**. Torch and checkpoint weights load
 lazily through `QuiltLayaBridge`, never at import — the ledger verifies in
@@ -20,7 +22,8 @@ environments where the decision engine cannot run at all.
 | **EFFECT** | `resolve(group_id, member_hash, rationale)` — a staked meta-attestation choosing one ensemble member; derived state, recomputable from rows |
 | **VIEW** | `view("json" \| "canon")` — a booked, receipted projection; the chain head is captured before the VIEW row so a view describes the ledger as it was |
 | **TICK** | the monotonic `tick` on every row; the hash chain is the partial order |
-| **REFUSED** | a named refusal row — malformed engine results, missing resolve targets, solo ensembles. Refusals are visible, never silent drops |
+| **FORGET** | `forget(target_hash, reason)` — the fleet's +1 opcode: a citation row marking a prior row superseded; the target is preserved verbatim, never deleted |
+| **REFUSED** | a named refusal row — malformed engine results, missing resolve/forget targets, solo ensembles. Refusals are visible, never silent drops |
 
 ## Doctrine
 
@@ -33,9 +36,10 @@ environments where the decision engine cannot run at all.
 - **Booked history is immutable by construction.** Answers are deep-copied
   through the canonical form at booking time; a later mutation of any
   object the engine handed back cannot rewrite a booked row.
-- **Integrity, not security.** fnv1a-32 catches accidental mutation and
-  pins tamper at its own row; payloads also carry sha-256 bindings for
-  state and questions. Swap the chain function by editing one constant —
+- **Integrity, not security.** The hash chain catches accidental mutation
+  and pins tamper at its own row; payloads also carry sha-256 bindings for
+  state and questions. Chain width is per-ledger via `chain=` — fnv1a-64
+  canonical (fleet mode), fnv1a-32 legacy —
   the checker plurality instinct: never one implementation, one algorithm,
   or one steward in sole custody.
 - **A ledger is one actor's stake stream.** Concurrency lives between
@@ -60,9 +64,11 @@ ledger attests to.
 
 ## Verification across substrates
 
-A row's `row_hash` is `fnv1a32(canonical(row_without_row_hash))` where
+A row's `row_hash` is `fnv(canonical(row_without_row_hash))` where `fnv`
+is the ledger's chain function (fnv1a-64 canonical, fnv1a-32 legacy) and
 `canonical` is `json.dumps(sort_keys=True, separators=(",", ":"),
-ensure_ascii=False)`. The chain input of the first row is `"0"*8`.
+ensure_ascii=False)`. The chain input of the first row is the width's
+genesis (`"0"*16` or `"0"*8`).
 Any substrate that can JSON-encode and run fnv1a can verify a Python
 ledger — that is the point.
 

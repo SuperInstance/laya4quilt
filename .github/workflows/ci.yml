@@ -53,6 +53,9 @@ jobs:
       - name: Quilt ledger tests
         run: python tests/test_quilt.py
 
+      - name: Quilt ledger v2 tests (canonical chain, JSONL WAL, FORGET)
+        run: python -m pytest tests/test_quilt_v2.py -q
+
       - name: Email cleaning tests
         run: python tests/test_email.py
 
