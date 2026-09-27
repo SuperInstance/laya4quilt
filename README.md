@@ -1,3 +1,122 @@
+# laya4quilt — Laya's typed decisions, booked as a verifiable ledger
+
+> **Folded from [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya).** Laya is a
+> multilingual, non-autoregressive System 1 decision engine: typed `choice` / `score` / `noul`
+> questions answered in a single forward pass, no text generation and nothing to hallucinate.
+> This fork keeps every checkpoint, benchmark, workflow preset, and the fine-tuning path
+> **byte-for-byte** — nothing in `laya/agent.py`, `laya/router.py`, or the model weights changes
+> behavior — and adds one new, stdlib-only module that turns each decision into an attested,
+> hash-chained ledger row the rest of the quilt fleet can verify without re-running the model.
+
+## Why this was folded into the quilt
+
+Laya answers fast and calibrated, but a bare `predict()` call is a fact with no memory: nothing
+downstream can prove which checkpoint decided what, in what order, or whether a later call
+silently overrode an earlier one. Laya's own README never has to ask that question — it measures
+accuracy and latency, not auditability. The quilt asks the question the upstream project doesn't:
+*can another system verify this decision happened, in this order, without re-running the model
+that made it?* Folding Laya in means every `predict()` result can also become a row a bookkeeper
+chains, disputes over, and checks — while the decision engine itself stays exactly what
+convaiinnovations shipped.
+
+## What changed
+
+- **Kept verbatim:** all three checkpoints (`laya`, `laya-multilingual`, `laya-typed-decisions`),
+  the `Router`, every number in [`BENCHMARKS.md`](BENCHMARKS.md), the RLCD fine-tuning notebook,
+  and the full upstream README (preserved below, unedited) — nothing on the inference path
+  changes behavior.
+- **Added:** [`laya/quilt.py`](laya/quilt.py) (`QuiltLedger` + `QuiltLayaBridge`, stdlib-only —
+  torch loads lazily through the bridge, never at import), [`docs/QUILT.md`](docs/QUILT.md) (the
+  five-opcode doctrine: BIND / LINK / EFFECT / VIEW / TICK, plus the fleet's own FORGET and
+  REFUSED), and [`examples/quilt_decisions.py`](examples/quilt_decisions.py), a deterministic,
+  no-weights-required demo of the ledger.
+- **Changed:** nothing outside the new `quilt.py` module — `laya/__init__.py` gained one import
+  line to export `QuiltLedger`/`QuiltLayaBridge`; every other file in `laya/` is upstream's.
+
+## What a reader learns
+
+- Laya teaches non-autoregressive typed decisioning: skip generation entirely, score fixed
+  question types (`choice` / `score` / `noul`) in one forward pass, and calibrate with strictly
+  proper scoring rules (RLCD) so a confidence number is actually meaningful — the README's own
+  measured collapse on non-Latin scripts (Khmer: 0.000 accuracy at 95.2% confidence) is the
+  concrete lesson in why you route on script/language, not on the model's own confidence.
+- Folding it into the quilt teaches the complementary half: how to wrap a stateless model call in
+  an append-only, independently verifiable record — five opcodes, one hash chain, zero required
+  dependencies — without touching the model's weights or its inference path, and without paying
+  torch's import cost when all you want is to verify a chain that already exists.
+
+## The quilt layer — a worked example
+
+`laya/quilt.py` never imports torch — it books plain dicts. Loaded standalone (bypassing the
+package's eager `agent.py` import, which does pull in torch for the model path), the same
+scenario [`examples/quilt_decisions.py`](examples/quilt_decisions.py) ships — two checkpoints
+disagree on a triage call, and the disagreement is resolved, not deleted — books like this:
+
+```python
+from laya.quilt import QuiltLedger
+
+ledger = QuiltLedger(actor="example-operator", engine="demo-checkpoint-a")
+state = "Customer reports a double charge and wants money back today."
+
+ledger.decide(state, QUESTIONS, checkpoint_a)                         # BIND
+group = ledger.ensemble("triage-dispute-1", state, QUESTIONS,         # LINK
+                        {"demo-checkpoint-a": checkpoint_a, "demo-checkpoint-b": checkpoint_b})
+ledger.resolve("triage-dispute-1", group["rows"][1],                  # EFFECT
+               "checkpoint-b reports higher calibrated confidence; escalate wins under dispute")
+
+ok, bad = ledger.verify()
+```
+
+Real output from that run:
+
+```
+rows booked : 5
+  t1  BIND    5a34e720
+  t2  BIND    2b2c1b3d
+  t3  BIND    2b9ebb48
+  t4  LINK    48ee533f
+  t5  EFFECT  f0daed16
+chain verify: True
+```
+
+Five rows, five opcodes in practice: two solo `BIND`s, one `LINK` (both checkpoints' answers kept
+side by side, neither deleted), and the `EFFECT` that resolves the dispute by citing the row it
+passed over. `ledger.verify()` walks the fnv1a chain and would pin tamper at the first bad row —
+here there isn't one.
+
+## How this connects
+
+laya4quilt's ledger speaks the same five-opcode doctrine as
+[jev-quilt](https://github.com/SuperInstance/jev-quilt) — BIND/LINK/EFFECT/VIEW/TICK plus FORGET
+and REFUSED, and the same instinct (disagreement preserved, refusal visible, integrity over
+security). See the generated block below for the current map of what this repo folds from and
+sits beside.
+
+<!-- QUILT:LINKS:START — generated from .quilt/links.yml by quilt-links.mjs. Do not edit by hand. -->
+## Cross-pollination — the Reader's Fold
+
+*Part of the **quilt** family. Under [Law 6](https://github.com/SuperInstance/jev-quilt), this repo carries no verdicts about its neighbors — only content-addressed pointers you fold under your own weights.*
+
+**Folded from** — [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya) — kept byte-for-byte; the quilt/ layer asks whether a decision can be verified without re-running the model
+
+**Grown on** — [jev-quilt](https://github.com/SuperInstance/jev-quilt)
+
+**Consumes** (folded from elsewhere)
+- [jev-quilt](https://github.com/SuperInstance/jev-quilt) — the five-opcode doctrine (BIND/LINK/EFFECT/VIEW/TICK) and the fnv1a hash-chain convention `laya/quilt.py` implements
+
+**Related** (1-hop siblings — Law 7)
+- [hermes-construct](https://github.com/SuperInstance/hermes-construct) — sibling quilt fork, same "fold a ledger onto an upstream engine" shape
+- [micrograd-quilt](https://github.com/SuperInstance/micrograd-quilt) — sibling fork of an external upstream, same "ask what the quilt adds" framing
+
+<sub>Regenerate: `node quilt-links.mjs` · Fleet map: [FLEET.md](https://github.com/SuperInstance/fleet-seeds/blob/main/FLEET.md)</sub>
+<!-- QUILT:LINKS:END -->
+
+---
+
+## Upstream README, preserved below
+
+Everything from here down is convaiinnovations' original Laya README, unedited.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/NandhaKishorM/laya/main/assets/logo-lockup-dark.png" />

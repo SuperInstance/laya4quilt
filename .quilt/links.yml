@@ -1,0 +1,24 @@
+# .quilt/links.yml — the Reader's Fold manifest (jev-quilt Law 6).
+# This repo carries NO verdicts about its neighbors — only content-addressed
+# pointers each reader folds under its own weights. Edit this file; never edit
+# the generated block in README.md by hand.
+
+repo: laya4quilt
+family: quilt
+
+substrate:                       # What this repo is GROWN ON (the upstream spine).
+  - repo: jev-quilt               # the five-opcode doctrine + fnv1a hash-chain convention
+
+consumes:                        # What THIS repo folds FROM elsewhere.
+  - repo: jev-quilt
+    what: the five-opcode doctrine (BIND/LINK/EFFECT/VIEW/TICK) and the fnv1a hash-chain convention laya/quilt.py implements
+
+related:                         # Sideways siblings — 1 HOP ONLY (Law 7, the Reach Bound).
+  - repo: hermes-construct
+    why: sibling quilt fork, same "fold a ledger onto an upstream engine" shape
+  - repo: micrograd-quilt
+    why: sibling fork of an external upstream, same "ask what the quilt adds" framing
+
+upstream:                        # FORKS ONLY — the folded-in origin (may be outside the org).
+  repo: NandhaKishorM/laya
+  why: kept byte-for-byte; the quilt/ layer asks whether a decision can be verified without re-running the model
